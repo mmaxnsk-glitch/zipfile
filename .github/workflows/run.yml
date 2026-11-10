@@ -2,7 +2,7 @@ name: Lichess Bot Runner
 
 concurrency:
   group: lichess-bot-runner
-  cancel-in-progress: true
+  cancel-in-progress: false # ВАЖНО: false, чтобы новый запуск не убивал текущий, а вставал в очередь
 
 on:
   workflow_dispatch:
@@ -42,11 +42,11 @@ permissions:
 jobs:
   bot-runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 355  # restart just before GitHub limit
+    timeout-minutes: 355  # 5 часов 55 минут (страховка от GitHub)
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4 # Обновил до v4, v5 пока сыроват
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -63,7 +63,6 @@ jobs:
       - name: Setup Engines
         run: |
           chmod +x engines/stockfish
-
 
       - name: Inject Lichess Bot Token
         env:
@@ -85,7 +84,8 @@ jobs:
 
       - name: Launch Bot
         run: |
-          CMD_BASE='python3 -u user_interface.py "matchmaking" "tournament H9R6QavB"'
+          # timeout 345m заставит бота умереть ровно через 5ч 45мин, чтобы успеть запустить новый
+          CMD_BASE='timeout 345m python3 -u user_interface.py "matchmaking" "tournament H9R6QavB"'
           MODE="${{ github.event.inputs.mode }}"
           TOUR_ID="${{ github.event.inputs.tournament_id }}"
           TEAM_ID="${{ github.event.inputs.team_id }}"
@@ -100,24 +100,27 @@ jobs:
               if [[ -z "$TOUR_ID" ]]; then
                   echo "⚠️ Tournament ID missing. Skipping."
               else
-                  # Construct CLI arguments correctly
                   ARGS="4jYqxDPn"
                   [[ -n "$TEAM_ID" ]] && ARGS="$ARGS $TEAM_ID"
                   [[ -n "$PASSWORD" ]] && ARGS="$ARGS $PASSWORD"
-
                   echo "🤖 Joining tournament: $ARGS"
-                  # pass tournament as real argument
                   eval "$CMD_BASE \"tournament $ARGS\""
               fi
-
           else
               echo "⚠️ Mode not recognized. Running normal mode."
               eval "$CMD_BASE"
           fi
 
-      - name: Auto-Restart After Timeout
-        run: |
-          BOT_PID=$!
-          ( sleep 20700 && echo "⏰ Time's up. Restarting bot..." && kill -SIGTERM $BOT_PID ) &
-          wait $BOT_PID
-          echo "Bot ended cleanly."  
+      # ЗАМЕНА СЛОМАННОГО ШАГА. Этот шаг запускает бота заново через API GitHub
+      - name: Trigger Next Run
+        if: always() # Сработает, даже если бот упал или был убит по таймауту
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("🔄 Бот завершил работу. Запускаем новую копию...");
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'run.yml', // Имя файла должно быть run.yml
+              ref: 'main'
+            });
