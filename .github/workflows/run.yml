@@ -2,7 +2,7 @@ name: Lichess Bot Runner
 
 concurrency:
   group: lichess-bot-runner
-  cancel-in-progress: false # ВАЖНО: false, чтобы новый запуск не убивал текущий, а вставал в очередь
+  cancel-in-progress: false # false — чтобы новый запуск не убивал текущий, а ждал
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ on:
         type: string
         required: false
   schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
+    - cron: '0 */6 * * *'  # Запуск каждые 6 часов
   push:
     branches: [ main ]
     paths:
@@ -37,16 +37,16 @@ on:
 
 permissions:
   actions: write
-  contents: write
+  contents: read # contents: write здесь не нужен, хватит read
 
 jobs:
   bot-runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 355  # 5 часов 55 минут (страховка от GitHub)
+    timeout-minutes: 355  # 5 часов 55 минут (лимит GitHub)
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4 # Обновил до v4, v5 пока сыроват
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -84,43 +84,54 @@ jobs:
 
       - name: Launch Bot
         run: |
-          # timeout 345m заставит бота умереть ровно через 5ч 45мин, чтобы успеть запустить новый
-          CMD_BASE='timeout 345m python3 -u user_interface.py "matchmaking" "tournament H9R6QavB"'
+          # timeout 345m заставит бота умереть через 5ч 45мин, чтобы успеть запустить новый
           MODE="${{ github.event.inputs.mode }}"
           TOUR_ID="${{ github.event.inputs.tournament_id }}"
           TEAM_ID="${{ github.event.inputs.team_id }}"
           PASSWORD="${{ github.event.inputs.password }}"
 
           if [[ "$MODE" == "matchmaking" ]]; then
-              CMD="$CMD_BASE matchmaking"
-              echo "🤖 Running command: $CMD"
-              eval "$CMD"
+              echo "🤖 Running matchmaking mode..."
+              timeout 345m python3 -u user_interface.py matchmaking
 
           elif [[ "$MODE" == "tournament" ]]; then
               if [[ -z "$TOUR_ID" ]]; then
-                  echo "⚠️ Tournament ID missing. Skipping."
+                  echo "⚠️ Tournament ID missing. Running default matchmaking instead."
+                  timeout 345m python3 -u user_interface.py matchmaking
               else
-                  ARGS="4jYqxDPn"
+                  echo "🤖 Joining tournament: $TOUR_ID"
+                  ARGS="$TOUR_ID"
                   [[ -n "$TEAM_ID" ]] && ARGS="$ARGS $TEAM_ID"
                   [[ -n "$PASSWORD" ]] && ARGS="$ARGS $PASSWORD"
-                  echo "🤖 Joining tournament: $ARGS"
-                  eval "$CMD_BASE \"tournament $ARGS\""
+                  
+                  timeout 345m python3 -u user_interface.py tournament $ARGS
               fi
           else
-              echo "⚠️ Mode not recognized. Running normal mode."
-              eval "$CMD_BASE"
+              echo "🤖 Running normal mode..."
+              timeout 345m python3 -u user_interface.py
           fi
 
-      # ЗАМЕНА СЛОМАННОГО ШАГА. Этот шаг запускает бота заново через API GitHub
+      # 🔥 ИСПРАВЛЕННЫЙ ХАК (добавлен блок inputs)
       - name: Trigger Next Run
         if: always() # Сработает, даже если бот упал или был убит по таймауту
         uses: actions/github-script@v7
         with:
           script: |
             console.log("🔄 Бот завершил работу. Запускаем новую копию...");
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'run.yml', // Имя файла должно быть run.yml
-              ref: 'main'
-            });
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'run.yml',
+                ref: 'main',
+                inputs: {
+                  mode: '${{ github.event.inputs.mode || 'matchmaking' }}',
+                  tournament_id: '${{ github.event.inputs.tournament_id || '' }}',
+                  team_id: '${{ github.event.inputs.team_id || '' }}',
+                  password: '${{ github.event.inputs.password || '' }}'
+                }
+              });
+              console.log("✅ Запрос на перезапуск успешно отправлен!");
+            } catch (error) {
+              console.error("❌ Ошибка при перезапуске:", error);
+            }
